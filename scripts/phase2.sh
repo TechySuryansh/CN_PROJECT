@@ -69,14 +69,31 @@ p2_guard()   { trap "$1" EXIT; trap "$1; exit 130" INT TERM; }
 p2_unguard() { trap - EXIT INT TERM; }
 
 # ------------------------------------------------------------ probes -------
-dig_at()   { "$DIG" +short +time=2 +tries=1 -p "$DNS_PORT" "@$1" "$APP_DOMAIN" 2>/dev/null | head -1; }
+dig_at()   { "$DIG" +noall +answer +time=2 +tries=1 -p "$DNS_PORT" "@$1" "${2:-$APP_DOMAIN}" A 2>/dev/null | awk '$4 == "A" {print $5; exit}'; }
 chk_dns2() { is_edge_ip "$(dig_at "$DNS2_IP")"; }
+# Both resolvers must publish the same app and API records, including after a cutover.
+p2_dns_agrees() {
+  local name primary backup
+  for name in "$APP_DOMAIN" "$API_DOMAIN"; do
+    primary="$(dig_at "$DNS_IP" "$name")"
+    backup="$(dig_at "$DNS2_IP" "$name")"
+    [ -n "$primary" ] && is_edge_ip "$primary" && [ "$primary" = "$backup" ] || return 1
+  done
+}
 edge_health_at() { app_curl --resolve "${APP_DOMAIN}:${EDGE_PORT}:$1" "$APP_URL/__edge/health" 2>/dev/null; }
 edge_label_at()  { app_curl --resolve "${APP_DOMAIN}:${EDGE_PORT}:$1" -o /dev/null -D - "$APP_URL/__edge/health" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="x-edge:"{print $2}'; }
 chk_edge_primary() { [ "$(edge_health_at "$EDGE_IP")" = "edge ok" ]; }
 chk_edge_standby() { [ "$(edge_health_at "$STANDBY_EDGE_IP")" = "edge ok" ]; }
 edge_now()       { app_curl -o /dev/null -D - "$APP_URL/__edge/health" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="x-edge:"{print $2}'; }
-resolver_has_backup() { [ -n "$DNS2_IP" ] && grep -q "nameserver $DNS2_IP" "$RESOLVER_FILE_DIR/$TEST_ZONE" 2>/dev/null; }
+resolver_has_backup() {
+  local primary="$DNS_IP"
+  p2_is_dns1 && primary=127.0.0.1
+  [ -n "$DNS2_IP" ] && [ "$primary" != "$DNS2_IP" ] || return 1
+  awk -v primary="$primary" -v backup="$DNS2_IP" '
+    $1 == "nameserver" { count++; if (count == 1 && $2 == primary) first=1; if (count == 2 && $2 == backup) second=1 }
+    END { exit !(first && second) }
+  ' "$RESOLVER_FILE_DIR/$TEST_ZONE" 2>/dev/null
+}
 
 # ------------------------------------------------------------- setup -------
 p2_topology_prompts() {
@@ -98,8 +115,8 @@ p2_plan() {
   p2_is_dns2    && echo "    - BACKUP DNS       : second dnsmasq with the same records (Extension A)"
   p2_is_edge    && echo "    - PRIMARY EDGE     : hands its certificate to the standby (Extension E)"
   p2_is_standby && echo "    - STANDBY EDGE     : second nginx, same config + same certificate (Extension E)"
-  p2_is_a       && echo "    - BACKEND A HOST   : firewall rules allow only the edge(s) (Extension C)"
-  p2_is_b       && echo "    - BACKEND B HOST   : firewall rules allow only the edge(s) (Extension C)"
+  p2_is_a       && echo "    - BACKEND A HOST   : firewall rules allow only the primary edge (Extension C)"
+  p2_is_b       && echo "    - BACKEND B HOST   : firewall rules allow only the primary edge (Extension C)"
   p2_is_dns1 || p2_is_dns2 || p2_is_edge || p2_is_standby || p2_is_backend || echo "    - client only      : resolver lists primary + backup DNS (Extension A)"
 }
 
@@ -156,6 +173,10 @@ p2_setup() {
 }
 
 p2_topology_line() {
+  local key
+  for key in DNS_IP EDGE_IP AJEESH_LAN_IP SARVJEET_LAN_IP; do
+    [ -n "${!key:-}" ] || { warn "Missing $key. Complete the LAN address table before sharing the setup command."; return 1; }
+  done
   printf '    ./bin/phase2 setup DNS_IP=%s EDGE_IP=%s AJEESH_LAN_IP=%s SARVJEET_LAN_IP=%s\n' "$DNS_IP" "$EDGE_IP" "$AJEESH_LAN_IP" "$SARVJEET_LAN_IP"
 }
 
@@ -196,13 +217,18 @@ p2_demo_dns_failover() {
   step "4. Clients keep resolving - through the backup"
   show dscacheutil -q host -a name "$APP_DOMAIN"
   show app_curl -o /dev/null -w "dns=%{time_namelookup}s http=%{http_code}\n" "$APP_URL/api/status"
-  if chk_dns_client; then ok "PASS: name still resolves and the HTTPS service answers with the primary DNS down"
+  local result=1
+  if [ -z "$(dig_at "$DNS_IP")" ] && chk_dns2 && is_edge_ip "$(resolve_via_system)" && chk_app; then
+    ok "PASS: the primary is down, backup DNS resolves the name and the application answers"
+    result=0
   else fail "FAIL: client could not resolve; is the backup running? (./bin/phase2 status on $DNS2_IP)"; fi
   why "DNS FAILURE = names stop resolving (here hidden by the backup). APPLICATION FAILURE = names resolve fine but the service answers 502/refuses."
   why "A cached answer would also hide a DNS outage until its TTL expires - that is Extension B."
   p2_restore_dns; p2_unguard
   step "5. Primary is back"
   show "$DIG" +noall +answer -p "$DNS_PORT" "@$DNS_IP" "$APP_DOMAIN"
+  chk_dns_server || return 1
+  return "$result"
 }
 
 # -------------------------------------------- Extension B: TTL + change -----
@@ -249,7 +275,7 @@ p2_iso_ports() { local p=""; p2_is_a && p="$BACKEND_A_PORT"; p2_is_b && p="$p $B
 p2_iso_render() {   # writes the rules + a pf.conf that includes them; validates both without root
   local ports allowed port; ports="$(p2_iso_ports)"
   [ -n "$ports" ] || die "This Mac ($(my_ip)) hosts no backend; run on A=$AJEESH_LAN_IP or B=$SARVJEET_LAN_IP."
-  allowed="${P2_ISO_ALLOW:-$EDGE_IP${STANDBY_EDGE_IP:+, $STANDBY_EDGE_IP}}"
+  allowed="${P2_ISO_ALLOW:-$EDGE_IP}"
   {
     echo "# cn-phase2 / Extension C. Generated. Backend ports are reachable ONLY from: $allowed"
     echo "pass in quick on lo0 all"
@@ -277,7 +303,7 @@ p2_iso_on() {
   sudo /sbin/pfctl -f "$P2_PF_CONF" >/dev/null 2>&1 || { [ -n "$tok" ] && sudo /sbin/pfctl -X "$tok" >/dev/null 2>&1; die "could not load the pf ruleset (nothing was changed)"; }
   sudo /sbin/pfctl -a "$P2_ANCHOR" -f "$P2_PF_RULES" >/dev/null 2>&1 || { sudo /sbin/pfctl -f /etc/pf.conf >/dev/null 2>&1; [ -n "$tok" ] && sudo /sbin/pfctl -X "$tok" >/dev/null 2>&1; die "could not load anchor rules (rolled back)"; }
   echo "${tok:-none}" > "$P2_PF_TOKEN"
-  ok "ISOLATION ON - ports $(p2_iso_ports) reachable only from the edge(s):"
+  ok "ISOLATION ON - ports $(p2_iso_ports) reachable remotely only from the primary edge:"
   sed 's/^/    /' "$P2_PF_RULES"
   info "Rollback any time: ./bin/phase2 isolate off   (also restores /etc/pf.conf; backups in $CN_BACKUP_DIR)"
 }
@@ -299,7 +325,7 @@ p2_iso_test() {   # run on ANY Mac: can THIS Mac reach the backend ports directl
   for id in A B; do
     if [ "$id" = A ]; then host="$BACKEND_A_HOST"; port="$BACKEND_A_PORT"; else host="$BACKEND_B_HOST"; port="$BACKEND_B_PORT"; fi
     if port_open "$host" "$port" 2; then reach=yes; else reach=no; fi
-    if is_me "$EDGE_IP" || is_me "$STANDBY_EDGE_IP" || is_me "$host"; then allowed=yes; else allowed=no; fi
+    if is_me "$EDGE_IP" || is_me "$host"; then allowed=yes; else allowed=no; fi
     if [ "$allowed" = "$reach" ]; then verdict="${C_GRN}as designed${C_RST}"
     elif [ "$allowed" = no ]; then verdict="${C_RED}NOT ISOLATED${C_RST} (rules off? run: ./bin/phase2 isolate on  on the backend Mac)"; bad=1
     else verdict="${C_RED}EDGE BLOCKED${C_RST} (allow-list wrong or backend down)"; bad=1; fi

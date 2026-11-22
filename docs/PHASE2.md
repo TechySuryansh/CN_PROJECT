@@ -3,6 +3,17 @@
 Brief, Section 7: Extensions A-F. Same network as Phase 1 (nothing rebuilt); one new command, `bin/phase2`.
 **LAN mode only** - the brief requires one shared LAN, and firewall rules by source IP mean nothing through the Cloudflare tunnel.
 
+## Current LAN and review status
+
+| Mac | LAN IP | Phase 2 duty |
+|---|---|---|
+| mac1-suryansh | `10.163.184.36` | Primary DNS and test client |
+| mac2-pranjal | `10.163.184.63` | Primary edge and backup DNS |
+| mac3-ajeesh | `10.163.184.26` | Backend A on TCP 3001 |
+| mac4-Sarvjeet | `10.163.184.143` | Backend B on TCP 3002 and standby edge |
+
+The first checks from Suryansh’s Mac are recorded in the [Phase 2 report](PHASE2_REPORT.md).
+
 ## Setup: one command per Mac
 
 Every Mac runs the **same** command. It reads the IP table and works out *by its own IP* what it is responsible for, so it works with 4 Macs or with combined roles on 2-3 Macs. It is idempotent.
@@ -39,7 +50,7 @@ Every demo saves a colour-free transcript to `evidence/phase2/` (Evidence Folder
 
 **B - TTL.** `local-ttl` stamps both records; Phase 1 uses 300 s, the demo drops to 30 s (`DEMO_TTL`) and restores. `dig` always asks the server, so it can never show caching; the demo therefore also queries through the **OS resolver** (`dscacheutil`), which is what browsers and `curl` use. The script prints what it *measured* - if the OS did not cache, it says so rather than claiming it did. *Explain:* for a migration lower the TTL **first**, change the record, wait one old TTL, then raise it; the TTL is the worst-case time users keep hitting the old server.
 
-**C - Isolation.** Rules live in a pf **anchor** (`cn-phase2`); `/etc/pf.conf` is never edited. Turning it on loads the system ruleset plus one anchor line; turning it off flushes the anchor and reloads the original, and a reboot clears it anyway. `pfctl -E`/`-X` tokens mean we never disable a firewall someone else had enabled. The allow-list is **edge + standby edge**: after an Extension E cutover the standby is the machine talking to the backends, so allowing only the primary would break the very failover we built. `pass on lo0` keeps same-Mac traffic working (nginx and a backend on one Mac). Disallowed packets are **dropped** (timeout), not refused, as a real firewall does. The rules are validated with `pfctl -n` before anything is touched, and a copy of the live rules is saved to `~/.config/cn-phase1/backups/`.
+**C - Isolation.** Rules live in a pf **anchor** (`cn-phase2`); `/etc/pf.conf` is never edited. Turning it on loads the system ruleset plus one anchor line; turning it off flushes the anchor and reloads the original, and a reboot clears it anyway. `pfctl -E`/`-X` tokens mean we never disable a firewall someone else had enabled. During Extension C, only Pranjal’s primary edge may connect remotely to the backend ports. Run `bin/phase2 isolate off` on both backend Macs after recording the edge and client tests. This restores access for the standby before the Extension E migration. `pass on lo0` keeps same-Mac traffic working (nginx and a backend on one Mac). Disallowed packets are **dropped** (timeout), not refused, as a real firewall does. The rules are validated with `pfctl -n` before anything is touched, and a copy of the live rules is saved to `~/.config/cn-phase1/backups/`.
 
 **D - HA failover.** Already in the nginx config: `max_fails=1 fail_timeout=5s`, `proxy_next_upstream error timeout 502-504`, 2 s connect timeout. nginx open source has only *passive* checks; that is enough because a failed attempt is retried on the other backend inside the same request, so the user sees no error. A recovered backend rejoins after `fail_timeout`. **Single point of failure: the edge nginx on Mac 2** (DNS is no longer one, thanks to A). Removing it needs automatic takeover - a floating IP shared by two edges (VRRP/keepalived) or DNS health checks that move the record by themselves. Extension E is the manual version of that.
 

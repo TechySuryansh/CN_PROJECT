@@ -84,8 +84,9 @@ flowchart LR
   C -->|"HTTPS :8443 (record -> edge, TTL-bound)"| E1["Mac 2 Pranjal<br/>PRIMARY nginx"]
   C -.->|"after cutover (Ext E)"| E2["Mac 4 Sarvjeet<br/>STANDBY nginx, same cert"]
   E1 --> FA["pf allow-list (Ext C)"]
-  E2 --> FA
   FA --> BA["Mac 3 Backend A :3001"]
   FA --> BB["Mac 4 Backend B :3002"]
+  E2 -. "Ext E, after firewall rollback" .-> BA
+  E2 -. "Ext E, after firewall rollback" .-> BB
   X["any other Mac"] -. "dropped by pf" .-> FA
 ```

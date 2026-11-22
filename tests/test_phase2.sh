@@ -9,7 +9,8 @@ detect_trust
 
 t_check "A  primary DNS $DNS_IP answers $APP_DOMAIN" "dnsmasq on Mac 1 is down or the record is wrong" chk_dns_server
 t_check "A  BACKUP DNS $DNS2_IP answers the same record" "backup dnsmasq is not running: on that Mac run ./bin/phase2 start" chk_dns2
-if [ -f "$RESOLVER_FILE_DIR/$TEST_ZONE" ]; then
+t_check "A  both DNS servers agree on app and API records" "compare both records on the primary and backup" p2_dns_agrees
+if p2_is_dns1 || p2_is_edge || [ -f "$RESOLVER_FILE_DIR/$TEST_ZONE" ]; then
   t_check "A  this Mac's resolver lists primary AND backup" "re-run ./bin/phase2 setup on this Mac" resolver_has_backup
 fi
 

@@ -31,7 +31,7 @@ detect_trust() {
 }
 
 # After a Phase 2 cutover the record legitimately points at the standby edge.
-is_edge_ip()      { [ "$1" = "$EDGE_IP" ] || { [ -n "${STANDBY_EDGE_IP:-}" ] && [ "$1" = "$STANDBY_EDGE_IP" ]; }; }
+is_edge_ip()      { [ -n "$1" ] && { [ "$1" = "$EDGE_IP" ] || [ "$1" = "${STANDBY_EDGE_IP:-}" ]; }; }
 chk_dns_server()  { is_edge_ip "$(resolve_via_dig)"; }
 chk_dns_client()  { is_edge_ip "$(client_resolved_ip)"; }
 chk_edge_tcp()    { port_open "$EDGE_IP" "$EDGE_PORT" 3; }
