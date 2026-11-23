@@ -1,0 +1,11 @@
+# failover | Sun Nov 22 22:45:01 IST 2026 | host=Suryanshs-MacBook-Pro-3 ip=10.35.22.85
+============================================================
+  EXTENSION D - HIGH-AVAILABILITY FAILOVER (stop Backend A)
+============================================================
+
+1. Healthy: both backends share the load
+    responses: A B A B A B A B
+
+2. STOP Backend A
+==> On the Backend A Mac run:  ./macs/mac3-ajeesh/stop.sh
+  waiting for Backend A to go down and nginx to route around it .............................................. TIMEOUT after 180s

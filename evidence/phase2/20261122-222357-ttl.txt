@@ -1,0 +1,43 @@
+# ttl | Sun Nov 22 22:23:57 IST 2026 | host=Suryanshs-MacBook-Pro-3 ip=10.35.22.85
+============================================================
+  EXTENSION B - DNS TTL AND CONTROLLED RECORD CHANGE
+============================================================
+
+1. Short, visible TTL (30s instead of 30s)
+  $ /usr/bin/dig +noall +answer -p 53 @127.0.0.1 app.team1.test
+    app.team1.test.		30	IN	A	10.35.22.169
+  WHY  the number after the name is the TTL: how long a resolver may keep this answer without asking again.
+
+2. Client resolves app.team1.test (answer is now cached by the OS)
+    client resolver: 10.35.22.169
+
+3. Change the record on the DNS server: 10.35.22.169 -> 10.35.22.126
+    server  (dig, never cached): 10.35.22.126
+    client  (OS resolver)      : 10.35.22.169
+✓ client still answers 10.35.22.169 (cached; the server already says something else)
+
+4. Wait for the TTL to expire (client polls every 3 s)
+    t+ 0s  client=10.35.22.169
+    t+ 3s  client=10.35.22.169
+    t+ 6s  client=10.35.22.169
+    t+ 9s  client=10.35.22.169
+    t+12s  client=10.35.22.169
+    t+15s  client=10.35.22.169
+    t+18s  client=10.35.22.169
+    t+21s  client=10.35.22.169
+    t+24s  client=10.35.22.169
+    t+27s  client=10.35.22.169
+    t+30s  client=10.35.22.169
+    t+33s  client=10.35.22.169
+    t+36s  client=10.35.22.169
+    t+39s  client=10.35.22.126
+✓ client switched to 10.35.22.126 after ~39s (TTL 30s)
+
+5. Manual cache flush gives an IMMEDIATE change
+    server now: 10.35.22.169   client (cached): 10.35.22.126
+  $ sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+    client after flush: 10.35.22.169
+✓ PASS: change visible instantly after the flush
+  WHY  production: lower the TTL BEFORE a migration, change the record, wait one TTL, then raise it again; that bounds how long users hit the old server.
+
+==> Restoring record -> 10.35.22.169 (TTL 30s)
